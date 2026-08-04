@@ -4,16 +4,16 @@ name: action
 # against a deliberately vulnerable fixture, on both runner families. An action
 # that is only read and never run is an action that breaks on its first user.
 
+# No path filter: this repository is the action, so every change to it can
+# change what a user gets. A weekly run also catches the case where nothing here
+# changed but a new VyQL release did, since the default `version: latest`
+# resolves at run time.
 on:
   pull_request:
-    paths:
-      - "action/**"
-      - ".github/workflows/action.yml"
   push:
     branches: [main]
-    paths:
-      - "action/**"
-      - ".github/workflows/action.yml"
+  schedule:
+    - cron: "23 5 * * 1"
   workflow_dispatch:
 
 permissions:
