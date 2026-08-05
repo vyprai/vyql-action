@@ -17,7 +17,7 @@ inputs:
     required: false
     default: "."
   version:
-    description: "VyQL release to use, e.g. v0.2.1. 'latest' resolves the newest release."
+    description: "VyQL release to use, e.g. v0.2.2. 'latest' resolves the newest release."
     required: false
     default: "latest"
   fail-on:
@@ -102,7 +102,7 @@ runs:
         if [ "$version" = "latest" ]; then
           version="$(gh release view --repo vyprai/vyql --json tagName --jq .tagName)"
           if [ -z "$version" ]; then
-            echo "::error::could not resolve the latest VyQL release. Pin one with version: v0.2.1"
+            echo "::error::could not resolve the latest VyQL release. Pin one with version: v0.2.2"
             exit 1
           fi
         fi
