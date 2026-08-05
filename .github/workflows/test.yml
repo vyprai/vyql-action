@@ -135,9 +135,51 @@ jobs:
 
       # Clean input must not fail a build. A scanner that flags everything is
       # as useless as one that flags nothing.
+      #
+      # A fixture rather than a path in this repository: what is in the tree
+      # changes, and a test that silently starts scanning something else -- or
+      # nothing -- stops testing what it claims to.
+      - name: Write a fixture with nothing wrong in it
+        run: |
+          mkdir -p /tmp/clean
+          cat > /tmp/clean/calc.py <<'PY'
+          """Pure computation: no input, no sinks, nothing to taint."""
+
+
+          def moving_average(values, window):
+              if window <= 0:
+                  raise ValueError("window must be positive")
+              out = []
+              for i in range(len(values)):
+                  lo = max(0, i - window + 1)
+                  chunk = values[lo:i + 1]
+                  out.append(sum(chunk) / len(chunk))
+              return out
+
+
+          def clamp(value, low, high):
+              return max(low, min(value, high))
+          PY
+
       - name: Clean code passes
+        id: clean
         uses: ./
         with:
-          path: action
-          output: ""
+          path: /tmp/clean
+          output: /tmp/clean.sarif
           upload-sarif: "false"
+
+      - name: It really scanned, and found nothing to gate on
+        env:
+          CODE: ${{ steps.clean.outputs.exit-code }}
+          FINDINGS: ${{ steps.clean.outputs.findings }}
+        run: |
+          echo "code=$CODE findings=$FINDINGS"
+          [ "$CODE" = "0" ] || { echo "clean code was gated"; exit 1; }
+          # A scan that read nothing also reports no findings. Requiring the
+          # SARIF to exist and parse separates "clean" from "never ran".
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/clean.sarif'))
+          assert d['version'] == '2.1.0', d['version']
+          print('SARIF ok, results:', sum(len(r.get('results') or []) for r in d['runs']))"
