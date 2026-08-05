@@ -1,0 +1,60 @@
+name: release
+
+# Actions are consumed by a moving major tag: `uses: vyprai/vyql-action@v1`
+# resolves to the newest v1.x. That tag has to be moved on every release, and
+# doing it by hand is how it silently stops moving -- users then pin a version
+# that stopped receiving fixes without any signal.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to point the major tag at, e.g. v1.2.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.event.release.tag_name }}
+
+jobs:
+  major-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Move the major tag to this release
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::tag '$TAG' is not vN.N.N"; exit 1 ;;
+          esac
+          MAJOR="${TAG%%.*}"
+          if [ "$MAJOR" = "$TAG" ]; then
+            echo "::error::'$TAG' has no minor/patch component; refusing to move '$MAJOR' onto itself"
+            exit 1
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # -f because the point of a major tag is that it moves.
+          git tag -f "$MAJOR" "$TAG"
+          git push -f origin "$MAJOR"
+          echo "$MAJOR -> $TAG"
+
+      - name: Confirm the major tag resolves to the release
+        run: |
+          set -euo pipefail
+          MAJOR="${TAG%%.*}"
+          git fetch --tags --force
+          got="$(git rev-list -n1 "$MAJOR")"
+          want="$(git rev-list -n1 "$TAG")"
+          echo "$MAJOR=$got  $TAG=$want"
+          # A push that appears to succeed but leaves the tag elsewhere would
+          # send every `@v1` consumer to the wrong commit.
+          [ "$got" = "$want" ] || { echo "::error::$MAJOR does not point at $TAG"; exit 1; }
