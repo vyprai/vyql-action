@@ -52,6 +52,14 @@ inputs:
     description: "Directory to run from."
     required: false
     default: "."
+  baseline:
+    description: "Findings to treat as already known: off | auto | a path to a baseline file. `auto` carries one in the Actions cache and gates on what a branch added. Needs VyQL v0.2.5 or newer."
+    required: false
+    default: "off"
+  baseline-ref:
+    description: "Base ref that `baseline: auto` measures a branch against. Empty uses the pull request's base, or the repository's default branch."
+    required: false
+    default: ""
 
 outputs:
   results-file:
@@ -63,6 +71,9 @@ outputs:
   exit-code:
     description: "The scanner's exit status. 0 means nothing met the threshold."
     value: ${{ steps.scan.outputs.exit-code }}
+  baseline-source:
+    description: "Where the baseline came from: off, file, cache, merge-base, or adopt."
+    value: ${{ steps.baseline.outputs.source || steps.plan.outputs.source }}
 
 runs:
   using: composite
@@ -157,6 +168,67 @@ runs:
         test -x ~/.vyql-action/"${NAME}"/bin/vyql
         test -d ~/.vyql-action/"${NAME}"/vyql
 
+    - name: Plan the baseline
+      id: plan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BASELINE: ${{ inputs.baseline }}
+        VYQL_VERSION: ${{ steps.resolve.outputs.version }}
+        EVENT_NAME: ${{ github.event_name }}
+        REF_NAME: ${{ github.ref_name }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        SCAN_PATH: ${{ inputs.path }}
+        EXCLUDE: ${{ inputs.exclude }}
+        PROFILE: ${{ inputs.profile }}
+        WORKDIR: ${{ inputs.working-directory }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        GITHUB_SHA: ${{ github.sha }}
+      run: "${{ github.action_path }}/scripts/baseline-plan.sh"
+
+    - name: Restore the cached baseline
+      id: baseline-cache
+      if: steps.plan.outputs.mode == 'auto'
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/vyql-baseline/cache
+        key: ${{ steps.plan.outputs.cache-key }}
+        restore-keys: ${{ steps.plan.outputs.restore-key }}
+
+    - name: Resolve the baseline
+      id: baseline
+      if: steps.plan.outputs.mode == 'auto'
+      shell: bash
+      env:
+        MODE: ${{ steps.plan.outputs.mode }}
+        RECORDING: ${{ steps.plan.outputs.recording }}
+        CACHE_HIT: ${{ steps.baseline-cache.outputs.cache-hit }}
+        BASELINE_DIR: ${{ runner.temp }}/vyql-baseline
+      run: "${{ github.action_path }}/scripts/baseline-resolve.sh"
+
+    # The binary paths are built here rather than passed as `env:` values: a `~`
+    # in an env value stays a literal tilde, and the script would look for a
+    # directory of that name.
+    - name: Seed a baseline from the merge base
+      if: steps.baseline.outputs.needs-seed == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        NAME: ${{ steps.resolve.outputs.name }}
+        BASE_REF: ${{ inputs.baseline-ref || github.base_ref || github.event.repository.default_branch }}
+        SCAN_PATH: ${{ inputs.path }}
+        EXCLUDE: ${{ inputs.exclude }}
+        PROFILE: ${{ inputs.profile }}
+        SEED: ${{ runner.temp }}/vyql-baseline/seed.json
+        WORKTREE: ${{ runner.temp }}/vyql-base-tree
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        root="$HOME/.vyql-action/$NAME"
+        export VYQL_BIN="$root/bin/vyql"
+        export VYQL_HOME="$root/vyql"
+        "$ACTION_PATH/scripts/baseline-seed.sh"
+
     - name: Scan
       id: scan
       shell: bash
@@ -170,6 +242,8 @@ runs:
         OUTPUT: ${{ inputs.output }}
         EXCLUDE: ${{ inputs.exclude }}
         PROFILE: ${{ inputs.profile }}
+        BL_APPLY: ${{ steps.baseline.outputs.apply || steps.plan.outputs.apply }}
+        BL_WRITE: ${{ steps.baseline.outputs.write }}
       run: |
         set -uo pipefail
         root=~/.vyql-action/"${NAME}"
@@ -179,7 +253,9 @@ runs:
         export VYQL_HOME="$root/vyql"
 
         args=(scan -fail-on "$FAIL_ON" -exit-code "$EXIT_CODE" -format "$FORMAT" -profile "$PROFILE")
-        [ -n "$EXCLUDE" ] && args+=(-exclude "$EXCLUDE")
+        if [ -n "$EXCLUDE" ]; then args+=(-exclude "$EXCLUDE"); fi
+        if [ -n "$BL_APPLY" ]; then args+=(-baseline "$BL_APPLY"); fi
+        if [ -n "$BL_WRITE" ]; then args+=(-baseline-write "$BL_WRITE"); fi
 
         "$root/bin/vyql" version
 
@@ -218,6 +294,30 @@ runs:
       with:
         sarif_file: ${{ inputs.working-directory }}/${{ inputs.output }}
         category: vyql
+
+    # Copied rather than cached in place: actions/cache restores to the path it
+    # saved from, and VyQL refuses to record onto the file it is applying, so the
+    # two have to stay separate until the scan is over.
+    - name: Stage the recorded baseline
+      if: steps.baseline.outputs.write != ''
+      shell: bash
+      env:
+        WRITTEN: ${{ steps.baseline.outputs.write }}
+        CACHE_DIR: ${{ runner.temp }}/vyql-baseline/cache
+      run: |
+        set -euo pipefail
+        mkdir -p "$CACHE_DIR"
+        cp "$WRITTEN" "$CACHE_DIR/baseline.json"
+
+    # A baseline that fails to cache costs the next run a merge-base scan. It
+    # must not cost this run its result.
+    - name: Cache the recorded baseline
+      if: steps.baseline.outputs.write != ''
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/vyql-baseline/cache
+        key: ${{ steps.plan.outputs.cache-key }}
 
     # Deferred to the end so the report is written and uploaded first. Failing
     # in the scan step would skip the upload and hide the very findings that
