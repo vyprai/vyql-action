@@ -25,6 +25,18 @@ assert_contains() { # label needle haystack
   esac
 }
 
+assert_not_contains() { # label needle haystack
+  case "$3" in
+    *"$2"*)
+      printf '  FAIL %s\n         found: %s\n         in:    %s\n' "$1" "$2" "$3"
+      FAILURES=$((FAILURES + 1))
+      ;;
+    *)
+      printf '  ok   %s\n' "$1"
+      ;;
+  esac
+}
+
 # out_val reads one key back out of a GITHUB_OUTPUT file. Last write wins, which
 # is how the runner's own reader treats a repeated key.
 out_val() { # file key
