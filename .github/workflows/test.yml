@@ -20,12 +20,27 @@ permissions:
   contents: read
 
 jobs:
+  # The baseline scripts carry the branching that decides whether a build is
+  # gated, so they are unit-tested directly. Both runner families, because macOS
+  # ships bash 3.2 and Linux does not. Needs no release: the seeding test drives
+  # a stand-in scanner.
+  unit:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash scripts/test/run.sh
+
   # The action downloads a published release, so it cannot run before one
   # exists. Skip with a clear reason rather than failing on a missing tag.
   release-exists:
     runs-on: ubuntu-latest
     outputs:
       found: ${{ steps.check.outputs.found }}
+      baseline-capable: ${{ steps.check.outputs.baseline-capable }}
     steps:
       - id: check
         env:
@@ -36,7 +51,20 @@ jobs:
             echo "latest release: $tag"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "baseline-capable=false" >> "$GITHUB_OUTPUT"
             echo "::notice::No published release yet, so the action cannot be exercised. This job is a no-op until the first tag."
+            exit 0
+          fi
+
+          # Rolling a baseline forward arrived in v0.2.5. Until that ships, the
+          # baseline job would fail on the action's own version floor, which
+          # says nothing about the change under test.
+          floor="v0.2.5"
+          if [ "$(printf '%s\n%s\n' "$floor" "$tag" | sort -V | head -1)" = "$floor" ]; then
+            echo "baseline-capable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "baseline-capable=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Latest release $tag predates $floor, so the baseline job is a no-op until $floor ships."
           fi
 
   scan-a-vulnerable-fixture:
@@ -183,3 +211,171 @@ jobs:
           d = json.load(open('/tmp/clean.sarif'))
           assert d['version'] == '2.1.0', d['version']
           print('SARIF ok, results:', sum(len(r.get('results') or []) for r in d['runs']))"
+
+  # A synthetic repository rather than fixtures committed here: this repository's
+  # own tree must not carry deliberately vulnerable code, and the merge-base path
+  # needs real history to resolve.
+  #
+  # Only on pull_request. `baseline: auto` records on the default branch and
+  # applies everywhere else, so on a push to main the action would adopt rather
+  # than gate and these assertions would be testing the wrong mode. Pull requests
+  # are also where the behaviour matters, so every change is still covered before
+  # it merges; the weekly scheduled run is not.
+  baseline:
+    needs: release-exists
+    if: needs.release-exists.outputs.baseline-capable == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The fixture path carries the run id because it feeds the baseline cache
+      # key, and a key shared with an earlier run would restore that run's
+      # baseline and silently test the cache path instead of the merge-base one.
+      - name: Build a repository with a backlog and a branch on top
+        id: fixture
+        env:
+          REPO: ${{ runner.temp }}/fixture-${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$REPO/src"
+          cd "$REPO"
+          git init -q -b main .
+          cat > src/vuln.py <<'PY'
+          import sqlite3
+          from flask import Flask, request
+          app = Flask(__name__)
+
+          @app.route("/u")
+          def u():
+              name = request.args.get("name")
+              conn = sqlite3.connect("app.db")
+              return conn.execute("SELECT * FROM users WHERE name = '" + name + "'").fetchall()
+          PY
+          git add -A
+          git -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m "the backlog"
+          git checkout -q -b feature
+          echo "repo=$REPO" >> "$GITHUB_OUTPUT"
+
+      # The finding is inherited, not introduced. A gate that fires here is a
+      # gate nobody can adopt.
+      - name: An inherited finding does not fail the branch
+        id: inherited
+        uses: ./
+        with:
+          working-directory: ${{ steps.fixture.outputs.repo }}
+          path: src
+          baseline: auto
+          baseline-ref: main
+          output: ${{ runner.temp }}/inherited.sarif
+          upload-sarif: "false"
+
+      - name: It seeded from the merge base and stayed green
+        env:
+          CODE: ${{ steps.inherited.outputs.exit-code }}
+          SOURCE: ${{ steps.inherited.outputs.baseline-source }}
+        run: |
+          set -euo pipefail
+          echo "code=$CODE source=$SOURCE"
+          [ "$SOURCE" = "merge-base" ] || { echo "baseline came from '$SOURCE', want merge-base"; exit 1; }
+          [ "$CODE" = "0" ] || { echo "an inherited finding failed the branch (exit $CODE)"; exit 1; }
+
+      # Kept for the committed-baseline case below, before the next run
+      # overwrites it.
+      - name: Keep the seeded baseline as a committed one would be
+        run: cp "${{ runner.temp }}/vyql-baseline/seed.json" "${{ runner.temp }}/committed.json"
+
+      - name: Add a finding on the branch
+        env:
+          REPO: ${{ steps.fixture.outputs.repo }}
+        run: |
+          set -euo pipefail
+          cd "$REPO"
+          cat > src/vuln2.py <<'PY'
+          import os
+          from flask import Flask, request
+          app = Flask(__name__)
+
+          @app.route("/r")
+          def r():
+              return os.system("ls " + request.args.get("dir"))
+          PY
+          git add -A
+          git -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m "branch work"
+
+      - name: A new finding fails the branch
+        id: introduced
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: ${{ steps.fixture.outputs.repo }}
+          path: src
+          baseline: auto
+          baseline-ref: main
+          output: ${{ runner.temp }}/introduced.sarif
+          upload-sarif: "false"
+
+      # Locations rather than a count: a rule pack that reports this fixture
+      # differently should not break the test, but reporting the inherited file
+      # would mean the baseline did nothing.
+      - name: It gated, and only on what the branch added
+        env:
+          OUTCOME: ${{ steps.introduced.outcome }}
+          SARIF: ${{ runner.temp }}/introduced.sarif
+        run: |
+          set -euo pipefail
+          [ "$OUTCOME" = "failure" ] || { echo "a newly introduced command injection passed"; exit 1; }
+          python3 -c "
+          import json, os
+          d = json.load(open(os.environ['SARIF']))
+          locs = {pl['artifactLocation']['uri']
+                  for run in d['runs'] for r in run.get('results') or []
+                  for pl in [r['locations'][0]['physicalLocation']]}
+          print('reported:', sorted(locs))
+          assert any('vuln2' in u for u in locs), 'the new finding was not reported'
+          assert not any(u.endswith('vuln.py') for u in locs), 'the inherited finding was re-reported'"
+
+      # A committed baseline is the reviewable alternative to the cached one, and
+      # takes a different path through the action: no cache, no seeding.
+      - name: A committed baseline is applied
+        id: committed
+        uses: ./
+        with:
+          working-directory: ${{ steps.fixture.outputs.repo }}
+          path: src
+          baseline: ${{ runner.temp }}/committed.json
+          fail-on: none
+          output: ${{ runner.temp }}/committed.sarif
+          upload-sarif: "false"
+
+      - name: It came from the file, and covered the backlog
+        env:
+          SOURCE: ${{ steps.committed.outputs.baseline-source }}
+          SARIF: ${{ runner.temp }}/committed.sarif
+        run: |
+          set -euo pipefail
+          [ "$SOURCE" = "file" ] || { echo "baseline came from '$SOURCE', want file"; exit 1; }
+          python3 -c "
+          import json, os
+          d = json.load(open(os.environ['SARIF']))
+          locs = {pl['artifactLocation']['uri']
+                  for run in d['runs'] for r in run.get('results') or []
+                  for pl in [r['locations'][0]['physicalLocation']]}
+          print('reported:', sorted(locs))
+          assert not any(u.endswith('vuln.py') for u in locs), 'the committed baseline suppressed nothing'"
+
+      - name: A missing baseline file fails with the path in the message
+        id: missing
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: ${{ steps.fixture.outputs.repo }}
+          path: src
+          baseline: /nope/absent.json
+          upload-sarif: "false"
+
+      - name: It refused rather than scanned
+        env:
+          OUTCOME: ${{ steps.missing.outcome }}
+        run: |
+          [ "$OUTCOME" = "failure" ] || { echo "a missing baseline file was accepted"; exit 1; }
+          echo "missing baseline refused"
