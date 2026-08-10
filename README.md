@@ -67,6 +67,8 @@ jobs:
 | `profile` | `auto` | Analysis profile |
 | `upload-sarif` | `true` | Upload to code scanning |
 | `working-directory` | `.` | Directory to run from |
+| `baseline` | `off` | `off`, `auto`, or a path to a baseline file. `auto` gates on what a branch added |
+| `baseline-ref` | | Base ref `auto` measures against. Empty uses the PR's base, or the default branch |
 
 ## Outputs
 
@@ -75,6 +77,7 @@ jobs:
 | `results-file` | Path to the report that was written |
 | `findings` | Number of findings reported |
 | `exit-code` | The scanner's status. `0` means nothing met the threshold |
+| `baseline-source` | Where the baseline came from: `off`, `file`, `cache`, `merge-base`, `adopt` |
 
 ## Report without failing
 
@@ -86,6 +89,67 @@ jobs:
 
 Findings still reach the Security tab; the build stays green. Useful for
 adopting the scanner on a codebase with a backlog.
+
+## Fail on what a pull request added
+
+`fail-on: none` turns the gate off for the backlog and for everything new along
+with it. A baseline is the other way to adopt the scanner on a codebase that
+already has findings: known findings stop failing the build, and anything a
+branch adds still does.
+
+```yaml
+- uses: actions/checkout@v5
+  with:
+    fetch-depth: 0            # baseline: auto compares against the merge base
+- uses: vyprai/vyql-action@v1
+  with:
+    baseline: auto
+    version: v0.2.5           # or newer; baseline needs it
+```
+
+`baseline: auto` carries the baseline in the Actions cache. A push to your
+default branch records one; a pull request restores it and reports only what the
+branch added. With no cached baseline, the run records one from the merge base of
+the branch and its base ref and compares against that, so a cold cache never
+turns into a wall of findings the branch did not introduce. Read
+`baseline-source` to see which of those happened.
+
+Prefer suppressions you can review in a diff? Point `baseline` at a file
+instead. Generate it with the scanner and commit it:
+
+```sh
+vyql scan -baseline-write vyql-baseline.json .
+```
+
+```yaml
+- uses: vyprai/vyql-action@v1
+  with:
+    baseline: vyql-baseline.json
+```
+
+Each entry carries a verdict — `accepted` or `false-positive` — and a reason
+field left empty for you to fill in as findings are triaged. Adding a
+suppression then shows up in the pull request that adds it.
+
+### What to expect
+
+**Code scanning shows what is new, not the backlog.** Under `baseline: auto` the
+uploaded SARIF holds only un-baselined findings, so code scanning closes the
+alerts for everything the baseline covers. That is the accepted backlog leaving
+the Security tab.
+
+**A new finding does not get absorbed by a failing build.** When a
+default-branch run fails, the finding that failed it is deliberately left out of
+the recorded baseline, so the next run fails too — until it is fixed, or triaged
+into the baseline by hand.
+
+**A cached baseline is taken at your default branch's tip.** A finding that
+existed when a branch was cut and was fixed on the default branch afterwards is
+absent from that baseline, so it reads as new on the branch. Rebasing clears it.
+
+**`fetch-depth: 0`.** `actions/checkout` clones one commit by default, which
+leaves no shared history to find a merge base in. Without it, a cold-cache run
+stops with a message saying so rather than guessing.
 
 ## Telling findings apart from a broken scan
 
@@ -114,7 +178,10 @@ fails while the scan result still stands, because the step is
 `continue-on-error`. Set `upload-sarif: false` to skip it.
 
 **VyQL v0.2.0 or newer.** The action passes `-fail-on` and `-exit-code`, which
-earlier builds do not have.
+earlier builds do not have. **`baseline` needs v0.2.5 or newer**, which is where
+applying a baseline while recording the next one arrived; the action stops with
+that message rather than scanning against a build that would read the flags
+differently.
 
 ## What it does
 
