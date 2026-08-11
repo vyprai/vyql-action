@@ -257,9 +257,9 @@ runs:
         fi
 
         args=(scan -fail-on "$FAIL_ON" -format "$FORMAT" -profile "$PROFILE")
-        # -exclude takes one pattern per occurrence: a comma inside a pattern is
-        # brace alternation, so the scanner rejects a comma-separated value. The
-        # action keeps the comma-separated input and splits it here.
+        # -exclude takes one pattern per occurrence: a comma would be ambiguous
+        # with a valid glob pattern, so the scanner rejects a comma-separated
+        # value. The action keeps the comma-separated input and splits it here.
         if [ -n "$EXCLUDE" ]; then
           IFS=',' read -ra patterns <<< "$EXCLUDE"
           for pattern in "${patterns[@]}"; do
