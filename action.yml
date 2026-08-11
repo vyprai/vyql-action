@@ -113,9 +113,21 @@ runs:
         if [ "$version" = "latest" ]; then
           version="$(gh release view --repo vyprai/vyql --json tagName --jq .tagName)"
           if [ -z "$version" ]; then
-            echo "::error::could not resolve the latest VyQL release. Pin one with version: v0.2.2"
+            echo "::error::could not resolve the latest VyQL release. Pin one with version: v0.3.0"
             exit 1
           fi
+        fi
+
+        # This action passes one -exclude per pattern and reads exit 3 as
+        # "findings". An older scanner requires a comma-separated -exclude and
+        # reports findings as exit 1, which this action would report as a
+        # scanner failure. Stopping here names the real reason; scanning anyway
+        # produces a confident-looking error about the wrong thing.
+        floor="v0.3.0"
+        if [ "$(printf '%s\n%s\n' "$floor" "$version" | sort -V | head -1)" != "$floor" ]; then
+          echo "::error::this action needs VyQL $floor or newer; resolved $version."
+          echo "::error::Pin version: $floor (or newer), or use an older tag of this action."
+          exit 1
         fi
 
         echo "goos=$goos"       >> "$GITHUB_OUTPUT"
