@@ -60,10 +60,10 @@ jobs:
 | `path` | `.` | Path to scan, relative to the workspace |
 | `version` | `latest` | VyQL release to use, e.g. `v0.2.3`. Pin it for reproducible runs |
 | `fail-on` | `high` | Fail at or above this severity: `none`, `info`, `low`, `medium`, `high`, `critical` |
-| `exit-code` | `1` | Status used when `fail-on` is met |
+| `exit-code` | | Accepted and ignored; VyQL exits `3` when `fail-on` is met |
 | `format` | `sarif` | `sarif`, `json` or `text` |
 | `output` | `vyql-results.sarif` | File to write to. Empty writes to the log |
-| `exclude` | | Comma-separated path segments to skip, e.g. `vendor,node_modules` |
+| `exclude` | | Comma-separated patterns to skip, e.g. `vendor,node_modules,**/*_templ.go`. A bare name is that directory at any depth; anything with a glob character or a slash matches the path |
 | `profile` | `auto` | Analysis profile |
 | `upload-sarif` | `true` | Upload to code scanning |
 | `working-directory` | `.` | Directory to run from |
@@ -76,7 +76,7 @@ jobs:
 |---|---|
 | `results-file` | Path to the report that was written |
 | `findings` | Number of findings reported |
-| `exit-code` | The scanner's status. `0` means nothing met the threshold |
+| `exit-code` | The scanner's status: `0` clean, `3` findings, `1` could not run, `2` bad invocation |
 | `baseline-source` | Where the baseline came from: `off`, `file`, `cache`, `merge-base`, `adopt` |
 
 ## Report without failing
@@ -153,18 +153,28 @@ stops with a message saying so rather than guessing.
 
 ## Telling findings apart from a broken scan
 
-Both exit 1 by default. Give findings their own status if the difference
-matters:
+They already have different statuses, and the action branches on them:
+
+| code | meaning | what the action does |
+|---|---|---|
+| `0` | nothing met the threshold | passes |
+| `1` | VyQL could not complete | fails, saying it is a scanner failure and not a finding |
+| `2` | invoked incorrectly | fails, pointing at the inputs |
+| `3` | findings met the threshold | fails, naming the count and severity |
+
+Read `steps.<id>.outputs.exit-code` to branch yourself:
 
 ```yaml
 - uses: vyprai/vyql-action@v1
   id: scan
   with:
-    exit-code: "3"
+    fail-on: high
+- if: steps.scan.outputs.exit-code == '3'
+  run: echo "findings, not a broken scanner"
 ```
 
-`3` means findings met the threshold, `1` means VyQL could not complete the
-scan, `2` means it was invoked incorrectly.
+The `exit-code` input is accepted and ignored. It existed to give findings a
+status distinct from a failed run, which the scanner now does on its own.
 
 ## Requirements
 
@@ -177,11 +187,13 @@ that upload also needs GitHub Advanced Security; without it the upload step
 fails while the scan result still stands, because the step is
 `continue-on-error`. Set `upload-sarif: false` to skip it.
 
-**VyQL v0.2.0 or newer.** The action passes `-fail-on` and `-exit-code`, which
-earlier builds do not have. **`baseline` needs v0.2.5 or newer**, which is where
-applying a baseline while recording the next one arrived; the action stops with
-that message rather than scanning against a build that would read the flags
-differently.
+**VyQL v0.3.0 or newer.** The action passes one `-exclude` per pattern and does
+not pass `-exclude` a comma-separated value, which earlier builds require, and
+it reads exit `3` as "findings", which earlier builds do not report. Pinning
+`version:` to a v0.2.x release with this action fails the scan step.
+
+The action stops with that message rather than scanning against a build that
+would read the flags differently.
 
 ## What it does
 

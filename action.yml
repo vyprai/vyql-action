@@ -25,9 +25,9 @@ inputs:
     required: false
     default: "high"
   exit-code:
-    description: "Exit status to use when fail-on is met. Set it to something other than 1 to tell findings apart from a scanner failure."
+    description: "Accepted and ignored. VyQL exits 3 when fail-on is met, 1 when it could not run and 2 when the invocation was wrong, so findings and failures already have distinct codes."
     required: false
-    default: "1"
+    default: ""
   format:
     description: "Output format: sarif | json | text."
     required: false
@@ -37,7 +37,7 @@ inputs:
     required: false
     default: "vyql-results.sarif"
   exclude:
-    description: "Comma-separated path segments to skip, e.g. vendor,node_modules."
+    description: "Comma-separated patterns to skip, e.g. vendor,node_modules,**/*_templ.go. A bare name means that directory at any depth; anything with a glob character or a slash is matched against the path. Each entry is passed as its own -exclude."
     required: false
     default: ""
   profile:
@@ -69,7 +69,7 @@ outputs:
     description: "Number of findings reported."
     value: ${{ steps.scan.outputs.findings }}
   exit-code:
-    description: "The scanner's exit status. 0 means nothing met the threshold."
+    description: "The scanner's exit status: 0 nothing met the threshold, 3 something did, 1 VyQL could not run, 2 the invocation was wrong."
     value: ${{ steps.scan.outputs.exit-code }}
   baseline-source:
     description: "Where the baseline came from: off, file, cache, merge-base, or adopt."
@@ -252,8 +252,21 @@ runs:
         # being scanned.
         export VYQL_HOME="$root/vyql"
 
-        args=(scan -fail-on "$FAIL_ON" -exit-code "$EXIT_CODE" -format "$FORMAT" -profile "$PROFILE")
-        if [ -n "$EXCLUDE" ]; then args+=(-exclude "$EXCLUDE"); fi
+        if [ -n "${EXIT_CODE:-}" ]; then
+          echo "::notice::exit-code is ignored. VyQL exits 3 when fail-on is met, 1 when it could not run and 2 when the invocation was wrong."
+        fi
+
+        args=(scan -fail-on "$FAIL_ON" -format "$FORMAT" -profile "$PROFILE")
+        # -exclude takes one pattern per occurrence: a comma inside a pattern is
+        # brace alternation, so the scanner rejects a comma-separated value. The
+        # action keeps the comma-separated input and splits it here.
+        if [ -n "$EXCLUDE" ]; then
+          IFS=',' read -ra patterns <<< "$EXCLUDE"
+          for pattern in "${patterns[@]}"; do
+            pattern="$(echo "$pattern" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            if [ -n "$pattern" ]; then args+=(-exclude "$pattern"); fi
+          done
+        fi
         if [ -n "$BL_APPLY" ]; then args+=(-baseline "$BL_APPLY"); fi
         if [ -n "$BL_WRITE" ]; then args+=(-baseline-write "$BL_WRITE"); fi
 
@@ -330,9 +343,15 @@ runs:
         FINDINGS: ${{ steps.scan.outputs.findings }}
       run: |
         set -euo pipefail
+        # VyQL's exit codes: 0 did what was asked, 1 could not complete, 2 the
+        # invocation cannot mean anything, 3 the check ran and did not pass.
         if [ "$CODE" = "0" ]; then
           echo "No finding at or above ${FAIL_ON}."
           exit 0
+        fi
+        if [ "$CODE" = "1" ]; then
+          echo "::error::VyQL could not complete (exit 1). This is a scanner failure, not a finding."
+          exit 1
         fi
         if [ "$CODE" = "2" ]; then
           echo "::error::VyQL was invoked incorrectly (exit 2). Check the inputs above."

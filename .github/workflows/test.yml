@@ -112,7 +112,7 @@ jobs:
         run: |
           echo "outcome=$OUTCOME code=$CODE findings=$FINDINGS"
           [ "$OUTCOME" = "failure" ] || { echo "the action passed on a SQL injection"; exit 1; }
-          [ "$CODE" = "1" ] || { echo "expected exit 1, got '$CODE'"; exit 1; }
+          [ "$CODE" = "3" ] || { echo "expected exit 3 (findings met the gate), got '$CODE'"; exit 1; }
           [ "${FINDINGS:-0}" -ge 1 ] || { echo "no findings counted"; exit 1; }
           python3 -c "
           import json
@@ -142,24 +142,46 @@ jobs:
           [ "$CODE" = "0" ] || { echo "fail-on none exited $CODE"; exit 1; }
           [ "${FINDINGS:-0}" -ge 1 ] || { echo "reported nothing"; exit 1; }
 
-      # A distinct -exit-code is how a pipeline tells findings apart from a
-      # scanner failure, so the plumbing for it has to work.
-      - name: A custom exit code is honoured
+      # The exit-code input is accepted and ignored. A workflow still setting it
+      # must keep working and must not change the status, because the scanner
+      # already gives findings a code of their own.
+      - name: The retired exit-code input is ignored, not honoured
         id: custom
         continue-on-error: true
         uses: ./
         with:
           path: /tmp/fixture
-          exit-code: "3"
+          exit-code: "9"
           output: /tmp/custom.sarif
           upload-sarif: "false"
 
-      - name: It exited 3
+      - name: It still exited 3
         env:
           CODE: ${{ steps.custom.outputs.exit-code }}
         run: |
           [ "$CODE" = "3" ] || { echo "expected exit 3, got '$CODE'"; exit 1; }
-          echo "exit-code honoured"
+          echo "exit-code input ignored, status unchanged"
+
+      # One -exclude per pattern. A comma-separated value reaches the scanner as
+      # a single pattern it rejects, so this asserts the splitting rather than
+      # only that the flag is passed.
+      - name: Multiple exclude patterns, including a glob
+        id: excluded
+        continue-on-error: true
+        uses: ./
+        with:
+          path: /tmp/fixture
+          exclude: "vendor, node_modules, **/*_templ.go"
+          fail-on: none
+          output: /tmp/excluded.sarif
+          upload-sarif: "false"
+
+      - name: The scan ran rather than failing on the patterns
+        env:
+          CODE: ${{ steps.excluded.outputs.exit-code }}
+        run: |
+          [ "$CODE" = "0" ] || { echo "exclude splitting broke the scan: exit '$CODE'"; exit 1; }
+          echo "exclude patterns split and accepted"
 
       # Clean input must not fail a build. A scanner that flags everything is
       # as useless as one that flags nothing.
