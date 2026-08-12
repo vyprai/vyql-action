@@ -36,40 +36,52 @@ jobs:
 
   # The action downloads a published release, so it cannot run before one
   # exists. Skip with a clear reason rather than failing on a missing tag.
+  # The action carries a version floor: it passes flags and reads exit codes that
+  # older scanners do not have. Until a release meeting that floor is published,
+  # every job that runs the action stops on the floor itself, which says nothing
+  # about the change under test. Those jobs skip instead, and say why.
   release-exists:
     runs-on: ubuntu-latest
     outputs:
       found: ${{ steps.check.outputs.found }}
-      baseline-capable: ${{ steps.check.outputs.baseline-capable }}
+      supported: ${{ steps.check.outputs.supported }}
     steps:
+      - uses: actions/checkout@v7
       - id: check
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          # Read the floor out of the action rather than restating it. Two copies
+          # drift, and the one here would drift silently: it decides whether the
+          # jobs run at all.
+          floor="$(sed -nE 's/^[[:space:]]*floor="(v[0-9][^"]*)".*/\1/p' action.yml | head -1)"
+          if [ -z "$floor" ]; then
+            echo "::error::could not read the version floor from action.yml"
+            exit 1
+          fi
+          echo "action requires: $floor"
+
           if tag="$(gh release view --repo vyprai/vyql --json tagName --jq .tagName 2>/dev/null)" && [ -n "$tag" ]; then
             echo "found=true" >> "$GITHUB_OUTPUT"
             echo "latest release: $tag"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "baseline-capable=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No published release yet, so the action cannot be exercised. This job is a no-op until the first tag."
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No published release yet, so the action cannot be exercised. These jobs are a no-op until the first tag."
             exit 0
           fi
 
-          # Rolling a baseline forward arrived in v0.2.5. Until that ships, the
-          # baseline job would fail on the action's own version floor, which
-          # says nothing about the change under test.
-          floor="v0.2.5"
           if [ "$(printf '%s\n%s\n' "$floor" "$tag" | sort -V | head -1)" = "$floor" ]; then
-            echo "baseline-capable=true" >> "$GITHUB_OUTPUT"
+            echo "supported=true" >> "$GITHUB_OUTPUT"
           else
-            echo "baseline-capable=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Latest release $tag predates $floor, so the baseline job is a no-op until $floor ships."
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Latest release $tag predates $floor, so the jobs that run the action are a no-op until $floor ships."
           fi
 
   scan-a-vulnerable-fixture:
     needs: release-exists
-    if: needs.release-exists.outputs.found == 'true'
+    if: needs.release-exists.outputs.supported == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -245,7 +257,7 @@ jobs:
   # it merges; the weekly scheduled run is not.
   baseline:
     needs: release-exists
-    if: needs.release-exists.outputs.baseline-capable == 'true' && github.event_name == 'pull_request'
+    if: needs.release-exists.outputs.supported == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
