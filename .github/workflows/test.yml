@@ -38,8 +38,7 @@ jobs:
   # exists. Skip with a clear reason rather than failing on a missing tag.
   # The action carries a version floor: it passes flags and reads exit codes that
   # older scanners do not have. Until a release meeting that floor is published,
-  # every job that runs the action stops on the floor itself, which says nothing
-  # about the change under test. Those jobs skip instead, and say why.
+  # the jobs that run the action skip.
   release-exists:
     runs-on: ubuntu-latest
     outputs:
@@ -52,9 +51,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # Read the floor out of the action rather than restating it. Two copies
-          # drift, and the one here would drift silently: it decides whether the
-          # jobs run at all.
           floor="$(sed -nE 's/^[[:space:]]*floor="(v[0-9][^"]*)".*/\1/p' action.yml | head -1)"
           if [ -z "$floor" ]; then
             echo "::error::could not read the version floor from action.yml"
@@ -174,16 +170,19 @@ jobs:
           [ "$CODE" = "3" ] || { echo "expected exit 3, got '$CODE'"; exit 1; }
           echo "exit-code input ignored, status unchanged"
 
-      # One -exclude per pattern. A comma-separated value reaches the scanner as
-      # a single pattern it rejects, so this asserts the splitting rather than
-      # only that the flag is passed.
+      # One -exclude per line, including a brace pattern -- which is why a comma
+      # cannot be the separator.
       - name: Multiple exclude patterns, including a glob
         id: excluded
         continue-on-error: true
         uses: ./
         with:
           path: /tmp/fixture
-          exclude: "vendor, node_modules, **/*_templ.go"
+          exclude: |
+            vendor
+            node_modules
+            **/*_templ.go
+            **/*.{test,spec}.ts
           fail-on: none
           output: /tmp/excluded.sarif
           upload-sarif: "false"
@@ -368,12 +367,9 @@ jobs:
           assert any('vuln2' in u for u in locs), 'the new finding was not reported'
           assert not any(u.endswith('vuln.py') for u in locs), 'the inherited finding was re-reported'"
 
-      # The finding above is critical, so it fails under any gate. The case that
-      # regressed is a new finding BELOW the usual threshold: the action passed
-      # its own fail-on default, which made every run explicit from the scanner's
-      # side and overrode the lower gate a baseline run takes. `baseline: auto`
-      # then accepted every new medium, silently, which is the opposite of what
-      # turning a baseline on asks for.
+      # The finding above is critical, so it fails under any gate. This covers a
+      # new finding BELOW the usual threshold, which a baseline run must still
+      # gate on.
       - name: Add a finding below the usual threshold
         env:
           REPO: ${{ steps.fixture.outputs.repo }}

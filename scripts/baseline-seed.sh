@@ -59,17 +59,14 @@ trap 'git worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true' EXIT
 # not gate, and its gate rank never reaches the recorder, so the seed carries the
 # base tree's findings at every severity.
 args=(scan -fail-on none -format json -profile "$PROFILE" -baseline-write "$SEED")
-# -exclude takes one pattern per occurrence: a comma would be ambiguous with a
-# valid glob pattern, so the scanner rejects a comma-separated value. The
-# action's input stays comma-separated and is split here, exactly as the scan
-# step splits it -- a seed built from a different file set than the scan would
-# baseline the wrong findings.
+# One pattern per line, split exactly as the scan step splits it: a seed built
+# from a different file set than the scan would baseline the wrong findings.
 if [ -n "$EXCLUDE" ]; then
-  IFS=',' read -ra exclude_patterns <<< "$EXCLUDE"
-  for exclude_pattern in "${exclude_patterns[@]}"; do
+  while IFS= read -r exclude_pattern; do
     exclude_pattern="$(printf '%s' "$exclude_pattern" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-    if [ -n "$exclude_pattern" ]; then args+=(-exclude "$exclude_pattern"); fi
-  done
+    if [ -z "$exclude_pattern" ]; then continue; fi
+    args+=(-exclude "$exclude_pattern")
+  done <<< "$EXCLUDE"
 fi
 
 export VYQL_HOME

@@ -21,11 +21,11 @@ inputs:
     required: false
     default: "latest"
   fail-on:
-    description: "Fail the build on a finding at or above this severity: none | info | low | medium | high | critical. Empty lets VyQL decide: high normally, any new finding when a baseline is applied, because a baseline asks what this change added and every addition counts."
+    description: "Fail the build on a finding at or above this severity: none | info | low | medium | high | critical. Empty lets VyQL decide: high normally, any new finding when a baseline is applied."
     required: false
     default: ""
   exit-code:
-    description: "Accepted and ignored. VyQL exits 3 when fail-on is met, 1 when it could not run and 2 when the invocation was wrong, so findings and failures already have distinct codes."
+    description: "Accepted and ignored because findings and failures already have distinct codes."
     required: false
     default: ""
   format:
@@ -37,7 +37,7 @@ inputs:
     required: false
     default: "vyql-results.sarif"
   exclude:
-    description: "Comma-separated patterns to skip, e.g. vendor,node_modules,**/*_templ.go. A bare name means that directory at any depth; anything with a glob character or a slash is matched against the path. Each entry is passed as its own -exclude."
+    description: "Patterns to skip, one per line. A bare name means that directory at any depth; anything with a glob character or a slash is matched against the path. Each line is passed as its own -exclude."
     required: false
     default: ""
   profile:
@@ -69,7 +69,7 @@ outputs:
     description: "Number of findings reported."
     value: ${{ steps.scan.outputs.findings }}
   exit-code:
-    description: "The scanner's exit status: 0 nothing met the threshold, 3 something did, 1 VyQL could not run, 2 the invocation was wrong."
+    description: "The scanner's exit status: 0 no finding, 1 runtime error, 2 invalid flags/args/subcommand, 3 there's a finding."
     value: ${{ steps.scan.outputs.exit-code }}
   baseline-source:
     description: "Where the baseline came from: off, file, cache, merge-base, or adopt."
@@ -119,10 +119,7 @@ runs:
         fi
 
         # This action passes one -exclude per pattern and reads exit 3 as
-        # "findings". An older scanner requires a comma-separated -exclude and
-        # reports findings as exit 1, which this action would report as a
-        # scanner failure. Stopping here names the real reason; scanning anyway
-        # produces a confident-looking error about the wrong thing.
+        # "findings", neither of which an older scanner does.
         floor="v0.3.0"
         if [ "$(printf '%s\n%s\n' "$floor" "$version" | sort -V | head -1)" != "$floor" ]; then
           echo "::error::this action needs VyQL $floor or newer; resolved $version."
@@ -271,19 +268,18 @@ runs:
         args=(scan -format "$FORMAT" -profile "$PROFILE")
         # -fail-on is passed only when set. Passing the action's own default made
         # every run explicit from the scanner's side, which overrode the lower
-        # gate a baseline run otherwise takes -- so `baseline: auto` silently
-        # accepted every new finding below high, which is the opposite of what
-        # turning a baseline on asks for.
+        # gate a baseline run otherwise takes.
         if [ -n "$FAIL_ON" ]; then args+=(-fail-on "$FAIL_ON"); fi
-        # -exclude takes one pattern per occurrence: a comma would be ambiguous
-        # with a valid glob pattern, so the scanner rejects a comma-separated
-        # value. The action keeps the comma-separated input and splits it here.
+        # One pattern per line. A comma cannot separate them: it is valid inside
+        # a glob, so `**/*.{test,spec}.ts` would split into two patterns that
+        # match nothing. A newline cannot appear in a pattern at all. Each line
+        # is passed through whole; the scanner decides whether it is a pattern.
         if [ -n "$EXCLUDE" ]; then
-          IFS=',' read -ra patterns <<< "$EXCLUDE"
-          for pattern in "${patterns[@]}"; do
-            pattern="$(echo "$pattern" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-            if [ -n "$pattern" ]; then args+=(-exclude "$pattern"); fi
-          done
+          while IFS= read -r pattern; do
+            pattern="$(printf '%s' "$pattern" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            if [ -z "$pattern" ]; then continue; fi
+            args+=(-exclude "$pattern")
+          done <<< "$EXCLUDE"
         fi
         if [ -n "$BL_APPLY" ]; then args+=(-baseline "$BL_APPLY"); fi
         if [ -n "$BL_WRITE" ]; then args+=(-baseline-write "$BL_WRITE"); fi
@@ -361,8 +357,8 @@ runs:
         FINDINGS: ${{ steps.scan.outputs.findings }}
       run: |
         set -euo pipefail
-        # VyQL's exit codes: 0 did what was asked, 1 could not complete, 2 the
-        # invocation cannot mean anything, 3 the check ran and did not pass.
+        # VyQL's exit codes: 0 no finding, 1 runtime error, 2 invalid
+        # flags/args/subcommand, 3 there's a finding.
         if [ "$CODE" = "0" ]; then
           echo "No finding at or above ${FAIL_ON:-the gate VyQL chose}."
           exit 0
