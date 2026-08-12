@@ -21,7 +21,7 @@ any HIGH or CRITICAL finding, and uploads SARIF to code scanning.
 ```yaml
 - uses: vyprai/vyql-action@v1     # action: gets fixes automatically
   with:
-    version: v0.2.3               # scanner: pinned, so results are reproducible
+    version: v0.3.0               # scanner: pinned, so results are reproducible
 ```
 
 They move independently on purpose. Tracking `@v1` means a fix to this action
@@ -58,7 +58,7 @@ jobs:
 | Input | Default | What it does |
 |---|---|---|
 | `path` | `.` | Path to scan, relative to the workspace |
-| `version` | `latest` | VyQL release to use, e.g. `v0.2.3`. Pin it for reproducible runs |
+| `version` | `latest` | VyQL release to use, e.g. `v0.3.0`. Pin it for reproducible runs |
 | `fail-on` | | Fail at or above this severity: `none`, `info`, `low`, `medium`, `high`, `critical`. Empty lets VyQL decide — see below |
 | `exit-code` | | Accepted and ignored; VyQL exits `3` when `fail-on` is met |
 | `format` | `sarif` | `sarif`, `json` or `text` |
@@ -104,7 +104,7 @@ branch adds still does.
 - uses: vyprai/vyql-action@v1
   with:
     baseline: auto
-    version: v0.2.5           # or newer; baseline needs it
+    version: v0.3.0           # or newer; this action needs it
 ```
 
 `baseline: auto` carries the baseline in the Actions cache. A push to your

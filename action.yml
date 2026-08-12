@@ -17,7 +17,7 @@ inputs:
     required: false
     default: "."
   version:
-    description: "VyQL release to use, e.g. v0.2.2. 'latest' resolves the newest release."
+    description: "VyQL release to use, e.g. v0.3.0. 'latest' resolves the newest release."
     required: false
     default: "latest"
   fail-on:
@@ -53,7 +53,7 @@ inputs:
     required: false
     default: "."
   baseline:
-    description: "Findings to treat as already known: off | auto | a path to a baseline file. `auto` carries one in the Actions cache and gates on what a branch added. Needs VyQL v0.2.5 or newer."
+    description: "Findings to treat as already known: off | auto | a path to a baseline file. `auto` carries one in the Actions cache and gates on what a branch added."
     required: false
     default: "off"
   baseline-ref:
