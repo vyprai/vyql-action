@@ -17,17 +17,17 @@ inputs:
     required: false
     default: "."
   version:
-    description: "VyQL release to use, e.g. v0.2.2. 'latest' resolves the newest release."
+    description: "VyQL release to use, e.g. v0.3.0. 'latest' resolves the newest release."
     required: false
     default: "latest"
   fail-on:
-    description: "Fail the build on a finding at or above this severity: none | info | low | medium | high | critical."
+    description: "Fail the build on a finding at or above this severity: none | info | low | medium | high | critical. Empty lets VyQL decide: high normally, any new finding when a baseline is applied."
     required: false
-    default: "high"
+    default: ""
   exit-code:
-    description: "Exit status to use when fail-on is met. Set it to something other than 1 to tell findings apart from a scanner failure."
+    description: "Accepted and ignored because findings and failures already have distinct codes."
     required: false
-    default: "1"
+    default: ""
   format:
     description: "Output format: sarif | json | text."
     required: false
@@ -37,7 +37,7 @@ inputs:
     required: false
     default: "vyql-results.sarif"
   exclude:
-    description: "Comma-separated path segments to skip, e.g. vendor,node_modules."
+    description: "Patterns to skip, one per line. A bare name means that directory at any depth; anything with a glob character or a slash is matched against the path. Each line is passed as its own -exclude."
     required: false
     default: ""
   profile:
@@ -53,7 +53,7 @@ inputs:
     required: false
     default: "."
   baseline:
-    description: "Findings to treat as already known: off | auto | a path to a baseline file. `auto` carries one in the Actions cache and gates on what a branch added. Needs VyQL v0.2.5 or newer."
+    description: "Findings to treat as already known: off | auto | a path to a baseline file. `auto` carries one in the Actions cache and gates on what a branch added."
     required: false
     default: "off"
   baseline-ref:
@@ -69,7 +69,7 @@ outputs:
     description: "Number of findings reported."
     value: ${{ steps.scan.outputs.findings }}
   exit-code:
-    description: "The scanner's exit status. 0 means nothing met the threshold."
+    description: "The scanner's exit status: 0 no finding, 1 runtime error, 2 invalid flags/args/subcommand, 3 there's a finding."
     value: ${{ steps.scan.outputs.exit-code }}
   baseline-source:
     description: "Where the baseline came from: off, file, cache, merge-base, or adopt."
@@ -113,9 +113,18 @@ runs:
         if [ "$version" = "latest" ]; then
           version="$(gh release view --repo vyprai/vyql --json tagName --jq .tagName)"
           if [ -z "$version" ]; then
-            echo "::error::could not resolve the latest VyQL release. Pin one with version: v0.2.2"
+            echo "::error::could not resolve the latest VyQL release. Pin one with version: v0.3.0"
             exit 1
           fi
+        fi
+
+        # This action passes one -exclude per pattern and reads exit 3 as
+        # "findings", neither of which an older scanner does.
+        floor="v0.3.0"
+        if [ "$(printf '%s\n%s\n' "$floor" "$version" | sort -V | head -1)" != "$floor" ]; then
+          echo "::error::this action needs VyQL $floor or newer; resolved $version."
+          echo "::error::Pin version: $floor (or newer), or use an older tag of this action."
+          exit 1
         fi
 
         echo "goos=$goos"       >> "$GITHUB_OUTPUT"
@@ -252,8 +261,26 @@ runs:
         # being scanned.
         export VYQL_HOME="$root/vyql"
 
-        args=(scan -fail-on "$FAIL_ON" -exit-code "$EXIT_CODE" -format "$FORMAT" -profile "$PROFILE")
-        if [ -n "$EXCLUDE" ]; then args+=(-exclude "$EXCLUDE"); fi
+        if [ -n "${EXIT_CODE:-}" ]; then
+          echo "::notice::exit-code is ignored. VyQL exits 3 when fail-on is met, 1 when it could not run and 2 when the invocation was wrong."
+        fi
+
+        args=(scan -format "$FORMAT" -profile "$PROFILE")
+        # -fail-on is passed only when set. Passing the action's own default made
+        # every run explicit from the scanner's side, which overrode the lower
+        # gate a baseline run otherwise takes.
+        if [ -n "$FAIL_ON" ]; then args+=(-fail-on "$FAIL_ON"); fi
+        # One pattern per line. A comma cannot separate them: it is valid inside
+        # a glob, so `**/*.{test,spec}.ts` would split into two patterns that
+        # match nothing. A newline cannot appear in a pattern at all. Each line
+        # is passed through whole; the scanner decides whether it is a pattern.
+        if [ -n "$EXCLUDE" ]; then
+          while IFS= read -r pattern; do
+            pattern="$(printf '%s' "$pattern" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            if [ -z "$pattern" ]; then continue; fi
+            args+=(-exclude "$pattern")
+          done <<< "$EXCLUDE"
+        fi
         if [ -n "$BL_APPLY" ]; then args+=(-baseline "$BL_APPLY"); fi
         if [ -n "$BL_WRITE" ]; then args+=(-baseline-write "$BL_WRITE"); fi
 
@@ -330,14 +357,20 @@ runs:
         FINDINGS: ${{ steps.scan.outputs.findings }}
       run: |
         set -euo pipefail
+        # VyQL's exit codes: 0 no finding, 1 runtime error, 2 invalid
+        # flags/args/subcommand, 3 there's a finding.
         if [ "$CODE" = "0" ]; then
-          echo "No finding at or above ${FAIL_ON}."
+          echo "No finding at or above ${FAIL_ON:-the gate VyQL chose}."
           exit 0
+        fi
+        if [ "$CODE" = "1" ]; then
+          echo "::error::VyQL could not complete (exit 1). This is a scanner failure, not a finding."
+          exit 1
         fi
         if [ "$CODE" = "2" ]; then
           echo "::error::VyQL was invoked incorrectly (exit 2). Check the inputs above."
           exit 2
         fi
-        echo "::error::VyQL found ${FINDINGS:-one or more} finding(s) at or above ${FAIL_ON}."
-        echo "Set fail-on: none to report without failing the build."
+        echo "::error::VyQL found ${FINDINGS:-one or more} finding(s) at or above ${FAIL_ON:-the gate VyQL chose}."
+        echo "Set fail-on: none to report without failing the build, or name a severity to raise the gate."
         exit "$CODE"

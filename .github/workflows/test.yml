@@ -36,40 +36,48 @@ jobs:
 
   # The action downloads a published release, so it cannot run before one
   # exists. Skip with a clear reason rather than failing on a missing tag.
+  # The action carries a version floor: it passes flags and reads exit codes that
+  # older scanners do not have. Until a release meeting that floor is published,
+  # the jobs that run the action skip.
   release-exists:
     runs-on: ubuntu-latest
     outputs:
       found: ${{ steps.check.outputs.found }}
-      baseline-capable: ${{ steps.check.outputs.baseline-capable }}
+      supported: ${{ steps.check.outputs.supported }}
     steps:
+      - uses: actions/checkout@v7
       - id: check
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
+          floor="$(sed -nE 's/^[[:space:]]*floor="(v[0-9][^"]*)".*/\1/p' action.yml | head -1)"
+          if [ -z "$floor" ]; then
+            echo "::error::could not read the version floor from action.yml"
+            exit 1
+          fi
+          echo "action requires: $floor"
+
           if tag="$(gh release view --repo vyprai/vyql --json tagName --jq .tagName 2>/dev/null)" && [ -n "$tag" ]; then
             echo "found=true" >> "$GITHUB_OUTPUT"
             echo "latest release: $tag"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
-            echo "baseline-capable=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No published release yet, so the action cannot be exercised. This job is a no-op until the first tag."
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No published release yet, so the action cannot be exercised. These jobs are a no-op until the first tag."
             exit 0
           fi
 
-          # Rolling a baseline forward arrived in v0.2.5. Until that ships, the
-          # baseline job would fail on the action's own version floor, which
-          # says nothing about the change under test.
-          floor="v0.2.5"
           if [ "$(printf '%s\n%s\n' "$floor" "$tag" | sort -V | head -1)" = "$floor" ]; then
-            echo "baseline-capable=true" >> "$GITHUB_OUTPUT"
+            echo "supported=true" >> "$GITHUB_OUTPUT"
           else
-            echo "baseline-capable=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Latest release $tag predates $floor, so the baseline job is a no-op until $floor ships."
+            echo "supported=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Latest release $tag predates $floor, so the jobs that run the action are a no-op until $floor ships."
           fi
 
   scan-a-vulnerable-fixture:
     needs: release-exists
-    if: needs.release-exists.outputs.found == 'true'
+    if: needs.release-exists.outputs.supported == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -112,7 +120,7 @@ jobs:
         run: |
           echo "outcome=$OUTCOME code=$CODE findings=$FINDINGS"
           [ "$OUTCOME" = "failure" ] || { echo "the action passed on a SQL injection"; exit 1; }
-          [ "$CODE" = "1" ] || { echo "expected exit 1, got '$CODE'"; exit 1; }
+          [ "$CODE" = "3" ] || { echo "expected exit 3 (findings met the gate), got '$CODE'"; exit 1; }
           [ "${FINDINGS:-0}" -ge 1 ] || { echo "no findings counted"; exit 1; }
           python3 -c "
           import json
@@ -142,24 +150,49 @@ jobs:
           [ "$CODE" = "0" ] || { echo "fail-on none exited $CODE"; exit 1; }
           [ "${FINDINGS:-0}" -ge 1 ] || { echo "reported nothing"; exit 1; }
 
-      # A distinct -exit-code is how a pipeline tells findings apart from a
-      # scanner failure, so the plumbing for it has to work.
-      - name: A custom exit code is honoured
+      # The exit-code input is accepted and ignored. A workflow still setting it
+      # must keep working and must not change the status, because the scanner
+      # already gives findings a code of their own.
+      - name: The retired exit-code input is ignored, not honoured
         id: custom
         continue-on-error: true
         uses: ./
         with:
           path: /tmp/fixture
-          exit-code: "3"
+          exit-code: "9"
           output: /tmp/custom.sarif
           upload-sarif: "false"
 
-      - name: It exited 3
+      - name: It still exited 3
         env:
           CODE: ${{ steps.custom.outputs.exit-code }}
         run: |
           [ "$CODE" = "3" ] || { echo "expected exit 3, got '$CODE'"; exit 1; }
-          echo "exit-code honoured"
+          echo "exit-code input ignored, status unchanged"
+
+      # One -exclude per line, including a brace pattern -- which is why a comma
+      # cannot be the separator.
+      - name: Multiple exclude patterns, including a glob
+        id: excluded
+        continue-on-error: true
+        uses: ./
+        with:
+          path: /tmp/fixture
+          exclude: |
+            vendor
+            node_modules
+            **/*_templ.go
+            **/*.{test,spec}.ts
+          fail-on: none
+          output: /tmp/excluded.sarif
+          upload-sarif: "false"
+
+      - name: The scan ran rather than failing on the patterns
+        env:
+          CODE: ${{ steps.excluded.outputs.exit-code }}
+        run: |
+          [ "$CODE" = "0" ] || { echo "exclude splitting broke the scan: exit '$CODE'"; exit 1; }
+          echo "exclude patterns split and accepted"
 
       # Clean input must not fail a build. A scanner that flags everything is
       # as useless as one that flags nothing.
@@ -223,7 +256,7 @@ jobs:
   # it merges; the weekly scheduled run is not.
   baseline:
     needs: release-exists
-    if: needs.release-exists.outputs.baseline-capable == 'true' && github.event_name == 'pull_request'
+    if: needs.release-exists.outputs.supported == 'true' && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -333,6 +366,69 @@ jobs:
           print('reported:', sorted(locs))
           assert any('vuln2' in u for u in locs), 'the new finding was not reported'
           assert not any(u.endswith('vuln.py') for u in locs), 'the inherited finding was re-reported'"
+
+      # The finding above is critical, so it fails under any gate. This covers a
+      # new finding BELOW the usual threshold, which a baseline run must still
+      # gate on.
+      - name: Add a finding below the usual threshold
+        env:
+          REPO: ${{ steps.fixture.outputs.repo }}
+        run: |
+          set -euo pipefail
+          cd "$REPO"
+          rm -f src/vuln2.py
+          cat > src/weak.py <<'PY'
+          import hashlib
+
+          def digest(x):
+              return hashlib.md5(x).hexdigest()
+          PY
+          git add -A
+          git -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m "weak hash"
+
+      - name: A new finding below high still fails, because a baseline is applied
+        id: belowgate
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: ${{ steps.fixture.outputs.repo }}
+          path: src
+          baseline: auto
+          baseline-ref: main
+          output: ${{ runner.temp }}/belowgate.sarif
+          upload-sarif: "false"
+
+      - name: It gated on the new finding rather than passing it
+        env:
+          OUTCOME: ${{ steps.belowgate.outcome }}
+          CODE: ${{ steps.belowgate.outputs.exit-code }}
+        run: |
+          set -euo pipefail
+          echo "outcome=$OUTCOME code=$CODE"
+          [ "$OUTCOME" = "failure" ] || {
+            echo "a new finding below high passed the branch; the baseline gate was overridden"
+            exit 1
+          }
+          [ "$CODE" = "3" ] || { echo "expected exit 3, got '$CODE'"; exit 1; }
+
+      # Naming a severity still wins, baseline or not.
+      - name: An explicit fail-on above it passes the same tree
+        id: explicitgate
+        uses: ./
+        with:
+          working-directory: ${{ steps.fixture.outputs.repo }}
+          path: src
+          baseline: auto
+          baseline-ref: main
+          fail-on: critical
+          output: ${{ runner.temp }}/explicitgate.sarif
+          upload-sarif: "false"
+
+      - name: It honoured the threshold that was asked for
+        env:
+          CODE: ${{ steps.explicitgate.outputs.exit-code }}
+        run: |
+          [ "$CODE" = "0" ] || { echo "an explicit fail-on was overridden: exit '$CODE'"; exit 1; }
 
       # A committed baseline is the reviewable alternative to the cached one, and
       # takes a different path through the action: no cache, no seeding.

@@ -21,7 +21,7 @@ any HIGH or CRITICAL finding, and uploads SARIF to code scanning.
 ```yaml
 - uses: vyprai/vyql-action@v1     # action: gets fixes automatically
   with:
-    version: v0.2.3               # scanner: pinned, so results are reproducible
+    version: v0.3.0               # scanner: pinned, so results are reproducible
 ```
 
 They move independently on purpose. Tracking `@v1` means a fix to this action
@@ -58,12 +58,12 @@ jobs:
 | Input | Default | What it does |
 |---|---|---|
 | `path` | `.` | Path to scan, relative to the workspace |
-| `version` | `latest` | VyQL release to use, e.g. `v0.2.3`. Pin it for reproducible runs |
-| `fail-on` | `high` | Fail at or above this severity: `none`, `info`, `low`, `medium`, `high`, `critical` |
-| `exit-code` | `1` | Status used when `fail-on` is met |
+| `version` | `latest` | VyQL release to use, e.g. `v0.3.0` |
+| `fail-on` | | Fail at or above this severity: `none`, `info`, `low`, `medium`, `high`, `critical`. Empty lets VyQL decide — see below |
+| `exit-code` | | Accepted and ignored; VyQL exits `3` when `fail-on` is met |
 | `format` | `sarif` | `sarif`, `json` or `text` |
 | `output` | `vyql-results.sarif` | File to write to. Empty writes to the log |
-| `exclude` | | Comma-separated path segments to skip, e.g. `vendor,node_modules` |
+| `exclude` | | Patterns to skip, one per line. A bare name is that directory at any depth; anything with a glob character or a slash matches the path |
 | `profile` | `auto` | Analysis profile |
 | `upload-sarif` | `true` | Upload to code scanning |
 | `working-directory` | `.` | Directory to run from |
@@ -76,7 +76,7 @@ jobs:
 |---|---|
 | `results-file` | Path to the report that was written |
 | `findings` | Number of findings reported |
-| `exit-code` | The scanner's status. `0` means nothing met the threshold |
+| `exit-code` | The scanner's status: `0` clean, `3` findings, `1` could not run, `2` bad invocation |
 | `baseline-source` | Where the baseline came from: `off`, `file`, `cache`, `merge-base`, `adopt` |
 
 ## Report without failing
@@ -104,7 +104,7 @@ branch adds still does.
 - uses: vyprai/vyql-action@v1
   with:
     baseline: auto
-    version: v0.2.5           # or newer; baseline needs it
+    version: v0.3.0           # or newer; this action needs it
 ```
 
 `baseline: auto` carries the baseline in the Actions cache. A push to your
@@ -151,20 +151,66 @@ absent from that baseline, so it reads as new on the branch. Rebasing clears it.
 leaves no shared history to find a merge base in. Without it, a cold-cache run
 stops with a message saying so rather than guessing.
 
+## What fails the build
+
+The default severity based on baseline flags:
+
+| | gate |
+|---|---|
+| no baseline | `high` and above |
+| `baseline` set | **any new finding** |
+
+you can override by setting `fail-on`:
+
+```yaml
+- uses: vyprai/vyql-action@v1
+  with:
+    baseline: auto
+    fail-on: critical      # only new criticals fail
+```
+
+## Skipping files
+
+One pattern per line. A comma cannot separate them, because a comma is valid
+inside a glob:
+
+```yaml
+- uses: vyprai/vyql-action@v1
+  with:
+    exclude: |
+      vendor
+      **/*_templ.go
+      src/gen/**
+      **/*.{test,spec}.ts
+```
+
+A bare name is that directory at any depth. Anything with a glob character or a
+slash is matched against the path. `vendor`, `node_modules`, `dist`, `target`,
+`testdata` and dot-directories are skipped already.
+
 ## Telling findings apart from a broken scan
 
-Both exit 1 by default. Give findings their own status if the difference
-matters:
+They already have different statuses, and the action branches on them:
+
+| code | meaning | what the action does |
+|---|---|---|
+| `0` | nothing met the threshold | passes |
+| `1` | VyQL could not complete | fails, saying it is a scanner failure and not a finding |
+| `2` | invoked incorrectly | fails, pointing at the inputs |
+| `3` | findings met the threshold | fails, naming the count and severity |
+
+Read `steps.<id>.outputs.exit-code` to branch yourself:
 
 ```yaml
 - uses: vyprai/vyql-action@v1
   id: scan
   with:
-    exit-code: "3"
+    fail-on: high
+- if: steps.scan.outputs.exit-code == '3'
+  run: echo "findings, not a broken scanner"
 ```
 
-`3` means findings met the threshold, `1` means VyQL could not complete the
-scan, `2` means it was invoked incorrectly.
+The `exit-code` input is accepted and ignored.
 
 ## Requirements
 
@@ -177,11 +223,10 @@ that upload also needs GitHub Advanced Security; without it the upload step
 fails while the scan result still stands, because the step is
 `continue-on-error`. Set `upload-sarif: false` to skip it.
 
-**VyQL v0.2.0 or newer.** The action passes `-fail-on` and `-exit-code`, which
-earlier builds do not have. **`baseline` needs v0.2.5 or newer**, which is where
-applying a baseline while recording the next one arrived; the action stops with
-that message rather than scanning against a build that would read the flags
-differently.
+**VyQL v0.3.0 or newer.** The action passes one `-exclude` per pattern where
+earlier builds require a comma-separated value, and reads exit `3` as
+"findings", which earlier builds do not report. Pinning `version:` to a v0.2.x
+release with this action fails the scan step.
 
 ## What it does
 

@@ -59,8 +59,14 @@ trap 'git worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true' EXIT
 # not gate, and its gate rank never reaches the recorder, so the seed carries the
 # base tree's findings at every severity.
 args=(scan -fail-on none -format json -profile "$PROFILE" -baseline-write "$SEED")
+# One pattern per line, split exactly as the scan step splits it: a seed built
+# from a different file set than the scan would baseline the wrong findings.
 if [ -n "$EXCLUDE" ]; then
-  args+=(-exclude "$EXCLUDE")
+  while IFS= read -r exclude_pattern; do
+    exclude_pattern="$(printf '%s' "$exclude_pattern" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    if [ -z "$exclude_pattern" ]; then continue; fi
+    args+=(-exclude "$exclude_pattern")
+  done <<< "$EXCLUDE"
 fi
 
 export VYQL_HOME
