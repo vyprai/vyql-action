@@ -59,7 +59,7 @@ jobs:
 |---|---|---|
 | `path` | `.` | Path to scan, relative to the workspace |
 | `version` | `latest` | VyQL release to use, e.g. `v0.2.3`. Pin it for reproducible runs |
-| `fail-on` | `high` | Fail at or above this severity: `none`, `info`, `low`, `medium`, `high`, `critical` |
+| `fail-on` | | Fail at or above this severity: `none`, `info`, `low`, `medium`, `high`, `critical`. Empty lets VyQL decide — see below |
 | `exit-code` | | Accepted and ignored; VyQL exits `3` when `fail-on` is met |
 | `format` | `sarif` | `sarif`, `json` or `text` |
 | `output` | `vyql-results.sarif` | File to write to. Empty writes to the log |
@@ -150,6 +150,30 @@ absent from that baseline, so it reads as new on the branch. Rebasing clears it.
 **`fetch-depth: 0`.** `actions/checkout` clones one commit by default, which
 leaves no shared history to find a merge base in. Without it, a cold-cache run
 stops with a message saying so rather than guessing.
+
+## What fails the build
+
+Left empty, `fail-on` is VyQL's to decide, and it decides on what you asked for:
+
+| | gate |
+|---|---|
+| no baseline | `high` and above |
+| `baseline` set | **any new finding** |
+
+A baseline changes the question. Without one the scan asks "is anything in this
+code wrong", and a severity floor is how a team declines to fix the long tail.
+With one it asks "did this change add anything", and every addition counts — a
+new medium is a regression your branch introduced, not part of a backlog someone
+accepted. The scan says so in its log when it takes the lower gate.
+
+Naming a severity always wins:
+
+```yaml
+- uses: vyprai/vyql-action@v1
+  with:
+    baseline: auto
+    fail-on: critical      # only new criticals fail
+```
 
 ## Telling findings apart from a broken scan
 

@@ -356,6 +356,72 @@ jobs:
           assert any('vuln2' in u for u in locs), 'the new finding was not reported'
           assert not any(u.endswith('vuln.py') for u in locs), 'the inherited finding was re-reported'"
 
+      # The finding above is critical, so it fails under any gate. The case that
+      # regressed is a new finding BELOW the usual threshold: the action passed
+      # its own fail-on default, which made every run explicit from the scanner's
+      # side and overrode the lower gate a baseline run takes. `baseline: auto`
+      # then accepted every new medium, silently, which is the opposite of what
+      # turning a baseline on asks for.
+      - name: Add a finding below the usual threshold
+        env:
+          REPO: ${{ steps.fixture.outputs.repo }}
+        run: |
+          set -euo pipefail
+          cd "$REPO"
+          rm -f src/vuln2.py
+          cat > src/weak.py <<'PY'
+          import hashlib
+
+          def digest(x):
+              return hashlib.md5(x).hexdigest()
+          PY
+          git add -A
+          git -c user.name=fixture -c user.email=fixture@example.invalid commit -q -m "weak hash"
+
+      - name: A new finding below high still fails, because a baseline is applied
+        id: belowgate
+        continue-on-error: true
+        uses: ./
+        with:
+          working-directory: ${{ steps.fixture.outputs.repo }}
+          path: src
+          baseline: auto
+          baseline-ref: main
+          output: ${{ runner.temp }}/belowgate.sarif
+          upload-sarif: "false"
+
+      - name: It gated on the new finding rather than passing it
+        env:
+          OUTCOME: ${{ steps.belowgate.outcome }}
+          CODE: ${{ steps.belowgate.outputs.exit-code }}
+        run: |
+          set -euo pipefail
+          echo "outcome=$OUTCOME code=$CODE"
+          [ "$OUTCOME" = "failure" ] || {
+            echo "a new finding below high passed the branch; the baseline gate was overridden"
+            exit 1
+          }
+          [ "$CODE" = "3" ] || { echo "expected exit 3, got '$CODE'"; exit 1; }
+
+      # Naming a severity still wins, baseline or not.
+      - name: An explicit fail-on above it passes the same tree
+        id: explicitgate
+        uses: ./
+        with:
+          working-directory: ${{ steps.fixture.outputs.repo }}
+          path: src
+          baseline: auto
+          baseline-ref: main
+          fail-on: critical
+          output: ${{ runner.temp }}/explicitgate.sarif
+          upload-sarif: "false"
+
+      - name: It honoured the threshold that was asked for
+        env:
+          CODE: ${{ steps.explicitgate.outputs.exit-code }}
+        run: |
+          [ "$CODE" = "0" ] || { echo "an explicit fail-on was overridden: exit '$CODE'"; exit 1; }
+
       # A committed baseline is the reviewable alternative to the cached one, and
       # takes a different path through the action: no cache, no seeding.
       - name: A committed baseline is applied
